@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write # needed to create GitHub Releases and upload assets
+
+jobs:
+  build-and-release:
+    name: Build & Release
+    runs-on: ubuntu-22.04
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────────────────────
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so git describe works
+
+      # ── Go toolchain ────────────────────────────────────────────────────────
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # ── Build dependencies (CGO requires gcc + musl for static linking) ────
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends gcc musl-tools libc6-dev
+
+      # ── Derive version from the tag ─────────────────────────────────────────
+      - name: Set version
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME}"          # e.g. v1.2.3
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building version: ${VERSION}"
+
+      # ── Build linux/amd64 (static) ──────────────────────────────────────────
+      - name: Build linux/amd64
+        env:
+          CGO_ENABLED: "1"
+          CC: musl-gcc
+          GOOS: linux
+          GOARCH: amd64
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist
+          go build \
+            -ldflags="-s -w -X main.version=${VERSION} -extldflags '-static'" \
+            -o dist/litesync-linux-amd64 \
+            ./cmd/litesync
+
+      # ── Build linux/arm64 (dynamic – musl cross-compiler not in default apt) ─
+      - name: Install arm64 cross-compiler
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+
+      - name: Build linux/arm64
+        env:
+          CGO_ENABLED: "1"
+          CC: aarch64-linux-gnu-gcc
+          GOOS: linux
+          GOARCH: arm64
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          go build \
+            -ldflags="-s -w -X main.version=${VERSION}" \
+            -o dist/litesync-linux-arm64 \
+            ./cmd/litesync
+
+      # ── Checksum file ───────────────────────────────────────────────────────
+      - name: Generate SHA-256 checksums
+        working-directory: dist
+        run: sha256sum litesync-linux-amd64 litesync-linux-arm64 > checksums.txt
+
+      # ── Create GitHub Release ───────────────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "litesync ${{ steps.version.outputs.version }}"
+          tag_name: ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/litesync-linux-amd64
+            dist/litesync-linux-arm64
+            dist/checksums.txt
