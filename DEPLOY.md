@@ -51,7 +51,7 @@ No Go installation or compilation is needed on the server.
 
 Releases are built automatically by the GitHub Actions workflow
 (`.github/workflows/release.yml`) and published to the
-[Releases page](https://github.com/mikaelhg/litesync/releases).
+[Releases page](https://github.com/ZenTenApp/litesync/releases).
 
 ### Determine your architecture
 
@@ -70,11 +70,11 @@ ARCH="amd64"   # or arm64
 
 # Download binary and checksum file
 curl -fsSL \
-  "https://github.com/mikaelhg/litesync/releases/download/${VERSION}/litesync-linux-${ARCH}" \
+  "https://github.com/ZenTenApp/litesync/releases/download/${VERSION}/litesync-linux-${ARCH}" \
   -o /tmp/litesync
 
 curl -fsSL \
-  "https://github.com/mikaelhg/litesync/releases/download/${VERSION}/checksums.txt" \
+  "https://github.com/ZenTenApp/litesync/releases/download/${VERSION}/checksums.txt" \
   -o /tmp/checksums.txt
 
 # Verify the checksum
@@ -121,7 +121,7 @@ Create the unit file:
 sudo tee /etc/systemd/system/litesync.service > /dev/null << 'EOF'
 [Unit]
 Description=litesync – self-hosted Brave sync server
-Documentation=https://github.com/mikaelhg/litesync
+Documentation=https://github.com/ZenTenApp/litesync
 After=network.target
 Wants=network.target
 
@@ -345,11 +345,11 @@ ARCH="amd64"   # or arm64
 
 # Download and verify
 curl -fsSL \
-  "https://github.com/mikaelhg/litesync/releases/download/${VERSION}/litesync-linux-${ARCH}" \
+  "https://github.com/ZenTenApp/litesync/releases/download/${VERSION}/litesync-linux-${ARCH}" \
   -o /tmp/litesync
 
 curl -fsSL \
-  "https://github.com/mikaelhg/litesync/releases/download/${VERSION}/checksums.txt" \
+  "https://github.com/ZenTenApp/litesync/releases/download/${VERSION}/checksums.txt" \
   -o /tmp/checksums.txt
 
 cd /tmp && grep "litesync-linux-${ARCH}" checksums.txt | sha256sum --check
