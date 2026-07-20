@@ -51,12 +51,35 @@ func StartServer(bindAddr, dbPath string) error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	// Bind the listener first so we can confirm the port is open before logging ready
+	listener, err := net.Listen("tcp", bindAddr)
+	if err != nil {
+		return fmt.Errorf("failed to bind %s: %w", bindAddr, err)
+	}
+
+	addr := listener.Addr().(*net.TCPAddr)
+	host := addr.IP.String()
+	if host == "::" || host == "0.0.0.0" {
+		host = "localhost"
+	}
+	port := addr.Port
+
 	// Start server in a goroutine so we can listen for signals concurrently
 	errChan := make(chan error, 1)
 	go func() {
-		logger.Info().Str("address", bindAddr).Msg("Starting HTTP server")
-		errChan <- server.ListenAndServe()
+		errChan <- server.Serve(listener)
 	}()
+
+	logger.Info().
+		Str("address", bindAddr).
+		Str("db", dbPath).
+		Msg("litesync server started")
+	logger.Info().
+		Str("sync_url", fmt.Sprintf("http://%s:%d/litesync", host, port)).
+		Msg("Brave sync URL")
+	logger.Info().
+		Str("brave_flag", fmt.Sprintf("--sync-url=http://%s:%d/litesync", host, port)).
+		Msg("Launch Brave with this flag to use this server")
 
 	// Wait for either server error or shutdown signal
 	select {
@@ -87,7 +110,7 @@ func StartServer(bindAddr, dbPath string) error {
 // setupLogger configures the application logger with environment-specific settings.
 func setupLogger(ctx context.Context) (context.Context, *zerolog.Logger) {
 	ctx = context.WithValue(ctx, appctx.EnvironmentCTXKey, os.Getenv("ENV"))
-	ctx = context.WithValue(ctx, appctx.LogLevelCTXKey, zerolog.WarnLevel)
+	ctx = context.WithValue(ctx, appctx.LogLevelCTXKey, zerolog.InfoLevel)
 	return logging.SetupLogger(ctx)
 }
 

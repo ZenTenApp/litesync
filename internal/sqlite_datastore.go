@@ -21,7 +21,11 @@ func NewSqliteDatastore(filename string) (*SqliteDatastore, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &SqliteDatastore{Db: db}, nil
+	ds := &SqliteDatastore{Db: db}
+	if err := ds.CreateTable(); err != nil {
+		return nil, fmt.Errorf("failed to initialize schema: %w", err)
+	}
+	return ds, nil
 }
 
 const createTableQuery = `
