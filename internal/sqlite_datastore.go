@@ -345,11 +345,62 @@ func (d SqliteDatastore) GetClientItemCount(clientID string) (*braveds.ClientIte
 }
 
 func (d SqliteDatastore) GetUpdatesForType(dataType int, clientToken int64, fetchFolders bool, clientID string, maxSize int64) (bool, []braveds.SyncEntity, error) {
-	return false, nil, nil
+	// Fetch one extra row to detect whether more results remain.
+	query := `
+		SELECT client_id, id, parent_id, version, mtime, ctime, name, non_unique_name,
+		       server_defined_unique_tag, deleted, originator_cache_guid,
+		       originator_client_item_id, specifics, data_type, folder,
+		       client_defined_unique_tag, unique_position, data_type_mtime, expiration_time
+		FROM sync_entities
+		WHERE client_id = ?
+		  AND data_type = ?
+		  AND mtime > ?`
+
+	if !fetchFolders {
+		query += ` AND (folder IS NULL OR folder = 0)`
+	}
+
+	query += ` ORDER BY mtime ASC LIMIT ?`
+
+	rows, err := d.Db.QueryContext(context.Background(), query, clientID, dataType, clientToken, maxSize+1)
+	if err != nil {
+		return false, nil, fmt.Errorf("GetUpdatesForType query failed: %w", err)
+	}
+	defer rows.Close()
+
+	var entities []braveds.SyncEntity
+	for rows.Next() {
+		var e braveds.SyncEntity
+		if err := rows.Scan(
+			&e.ClientID, &e.ID, &e.ParentID, &e.Version, &e.Mtime, &e.Ctime,
+			&e.Name, &e.NonUniqueName, &e.ServerDefinedUniqueTag, &e.Deleted,
+			&e.OriginatorCacheGUID, &e.OriginatorClientItemID, &e.Specifics,
+			&e.DataType, &e.Folder, &e.ClientDefinedUniqueTag, &e.UniquePosition,
+			&e.DataTypeMtime, &e.ExpirationTime,
+		); err != nil {
+			return false, nil, fmt.Errorf("GetUpdatesForType scan failed: %w", err)
+		}
+		entities = append(entities, e)
+	}
+	if err := rows.Err(); err != nil {
+		return false, nil, fmt.Errorf("GetUpdatesForType rows error: %w", err)
+	}
+
+	hasChangesRemaining := false
+	if int64(len(entities)) > maxSize {
+		hasChangesRemaining = true
+		entities = entities[:maxSize]
+	}
+
+	return hasChangesRemaining, entities, nil
 }
 
 func (d SqliteDatastore) HasServerDefinedUniqueTag(clientID string, tag string) (bool, error) {
-	return false, nil
+	var exists bool
+	err := d.Db.QueryRowContext(context.Background(),
+		"SELECT EXISTS(SELECT 1 FROM sync_entities WHERE client_id = ? AND id = ?)",
+		clientID, "Server#"+tag).Scan(&exists)
+	return exists, err
 }
 
 func (d SqliteDatastore) UpdateClientItemCount(counts *braveds.ClientItemCounts, newNormalItemCount int, newHistoryItemCount int) error {
@@ -366,4 +417,12 @@ func (d SqliteDatastore) DisableSyncChain(clientID string) error {
 
 func (d SqliteDatastore) IsSyncChainDisabled(clientID string) (bool, error) {
 	return false, nil
+}
+
+func (d SqliteDatastore) HasItem(clientID string, ID string) (bool, error) {
+	var exists bool
+	err := d.Db.QueryRowContext(context.Background(),
+		"SELECT EXISTS(SELECT 1 FROM sync_entities WHERE client_id = ? AND id = ?)",
+		clientID, ID).Scan(&exists)
+	return exists, err
 }
