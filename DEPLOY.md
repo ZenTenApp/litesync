@@ -15,17 +15,13 @@ A self-hosted Brave sync server backed by SQLite3 and an in-memory cache.
   - [3. Create a Dedicated System User](#3-create-a-dedicated-system-user)
   - [4. Install the Binary and Data Directory](#4-install-the-binary-and-data-directory)
   - [5. Configure systemd Service](#5-configure-systemd-service)
-  - [6. Open the Firewall Port](#6-open-the-firewall-port)
-    - [Using ufw (recommended)](#using-ufw-recommended)
-  - [7. (Optional) Reverse Proxy with Nginx + TLS](#7-optional-reverse-proxy-with-nginx--tls)
-    - [7.1 Install Nginx and Certbot](#71-install-nginx-and-certbot)
-    - [7.2 Create the Nginx site](#72-create-the-nginx-site)
-    - [7.3 Obtain a TLS certificate](#73-obtain-a-tls-certificate)
-    - [7.4 Lock down the port](#74-lock-down-the-port)
-  - [8. Point Brave Browser at the Server](#8-point-brave-browser-at-the-server)
-    - [Without TLS (LAN / local use)](#without-tls-lan--local-use)
-    - [With TLS via Nginx](#with-tls-via-nginx)
-  - [9. Maintenance](#9-maintenance)
+  - [6. Reverse Proxy with Nginx + TLS](#6-reverse-proxy-with-nginx--tls)
+    - [6.1 Install Nginx and Certbot](#61-install-nginx-and-certbot)
+    - [6.2 Create the Nginx site](#62-create-the-nginx-site)
+    - [6.3 Obtain a TLS certificate](#63-obtain-a-tls-certificate)
+    - [6.4 Reload Nginx](#64-reload-nginx)
+  - [7. Point Brave Browser at the Server](#7-point-brave-browser-at-the-server)
+  - [8. Maintenance](#8-maintenance)
     - [View logs](#view-logs)
     - [Update the binary](#update-the-binary)
     - [Backup the database](#backup-the-database)
@@ -40,8 +36,8 @@ A self-hosted Brave sync server backed by SQLite3 and an in-memory cache.
 | Ubuntu 22.04 LTS or later | 20.04 works too                     |
 | `curl`                    | Pre-installed on most Ubuntu images |
 | `systemd`                 | Already present                     |
-| `ufw` (optional)          | For firewall management             |
-| `nginx` (optional)        | Only needed for TLS / reverse proxy |
+| `nginx`                   | Required for TLS termination        |
+| `certbot`                 | Required for TLS certificate        |
 
 No Go installation or compilation is needed on the server.
 
@@ -74,12 +70,12 @@ curl -fsSL \
   -o /tmp/litesync
 
 curl -fsSL \
-  "https://github.com/ZenTenApp/litesync/releases/download/${VERSION}/checksums.txt" \
-  -o /tmp/checksums.txt
+  "https://github.com/ZenTenApp/litesync/releases/download/${VERSION}/litesync-linux-${ARCH}.sha256" \
+  -o /tmp/litesync.sha256
 
 # Verify the checksum
 cd /tmp
-grep "litesync-linux-${ARCH}" checksums.txt | sha256sum --check
+sha256sum --check litesync.sha256
 # litesync-linux-amd64: OK
 ```
 
@@ -130,9 +126,9 @@ Type=simple
 User=litesync
 Group=litesync
 
-# Binary and flags
+# Binary and flags – bind to localhost only; Nginx handles external traffic
 ExecStart=/usr/local/bin/litesync \
-    -bind :8295 \
+    -bind 127.0.0.1:8295 \
     -db /var/lib/litesync/litesync.sqlite
 
 # Restart policy
@@ -180,96 +176,68 @@ sudo systemctl status litesync
 sudo journalctl -u litesync -f
 ```
 
-Verify the health endpoint:
+Verify the health endpoint (localhost only):
 
 ```bash
-curl -s http://localhost:8295/
+curl -s http://127.0.0.1:8295/
 # OK
 ```
 
 ---
 
-## 6. Open the Firewall Port
+## 6. Reverse Proxy with Nginx + TLS
 
-### Using ufw (recommended)
+Nginx terminates TLS and forwards requests to litesync on `127.0.0.1:8295`.
 
-```bash
-# Allow only from a specific IP (e.g. your home/office IP)
-sudo ufw allow from <your-client-ip> to any port 8295 proto tcp
-
-# OR allow from anywhere (less secure – only do this behind a reverse proxy)
-sudo ufw allow 8295/tcp
-
-sudo ufw reload
-sudo ufw status
-```
-
-> **Security note:** Port 8295 carries unencrypted HTTP. Restrict it to trusted IPs
-> or put it behind a TLS-terminating reverse proxy (see §7) before exposing it to
-> the internet.
-
----
-
-## 7. (Optional) Reverse Proxy with Nginx + TLS
-
-This section sets up HTTPS termination so Brave can reach the server securely over the internet.
-
-### 7.1 Install Nginx and Certbot
+### 6.1 Install Nginx and Certbot
 
 ```bash
 sudo apt update
 sudo apt install -y nginx certbot python3-certbot-nginx
 ```
 
-### 7.2 Create the Nginx site
+### 6.2 Create the Nginx site
 
 ```bash
-sudo tee /etc/nginx/sites-available/litesync > /dev/null << 'EOF'
+sudo tee /etc/nginx/sites-available/default > /dev/null << NGINX_EOF
 server {
-    listen 80;
     server_name sync.example.com;   # <-- replace with your domain
 
     location / {
-        return 301 https://$host$request_uri;
-    }
-}
+        proxy_pass http://127.0.0.1:8295;
 
-server {
-    listen 443 ssl http2;
-    server_name sync.example.com;   # <-- replace with your domain
-
-    # TLS certificates (filled in by certbot)
-    ssl_certificate     /etc/letsencrypt/live/sync.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/sync.example.com/privkey.pem;
-    include             /etc/letsencrypt/options-ssl-nginx.conf;
-    ssl_dhparam         /etc/letsencrypt/ssl-dhparams.pem;
-
-    # Proxy to litesync
-    location /litesync {
-        proxy_pass         http://127.0.0.1:8295;
         proxy_http_version 1.1;
-        proxy_set_header   Host              $host;
-        proxy_set_header   X-Real-IP         $remote_addr;
-        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header   X-Forwarded-Proto $scheme;
         proxy_read_timeout 70s;
-    }
 
-    # Health check passthrough
-    location = / {
-        proxy_pass http://127.0.0.1:8295/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header X-Real-IP \$remote_addr;
     }
 }
-EOF
-
-sudo ln -s /etc/nginx/sites-available/litesync /etc/nginx/sites-enabled/litesync
-sudo nginx -t && sudo systemctl reload nginx
+NGINX_EOF
 ```
 
-### 7.3 Obtain a TLS certificate
+Test the Nginx config:
 
 ```bash
-sudo certbot --nginx -d sync.example.com
+sudo nginx -t
+```
+
+### 6.3 Obtain a TLS certificate
+
+```bash
+sudo certbot --nginx -d "$Replace_with_your_domain" --non-interactive --agree-tos -m "$Replace_with_your_email"
+```
+
+### 6.4 Reload Nginx
+
+```bash
+sudo systemctl reload nginx
 ```
 
 Certbot will automatically renew the certificate. Verify the renewal timer:
@@ -278,39 +246,9 @@ Certbot will automatically renew the certificate. Verify the renewal timer:
 sudo systemctl status certbot.timer
 ```
 
-### 7.4 Lock down the port
-
-Once Nginx is in front, block direct access to port 8295 from outside:
-
-```bash
-sudo ufw delete allow 8295/tcp   # remove any previous rule
-# litesync now only listens on 127.0.0.1 – no external rule needed
-```
-
-Update the `ExecStart` line in the systemd unit to bind only to localhost:
-
-```ini
-ExecStart=/usr/local/bin/litesync \
-    -bind 127.0.0.1:8295 \
-    -db /var/lib/litesync/litesync.sqlite
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart litesync
-```
-
 ---
 
-## 8. Point Brave Browser at the Server
-
-### Without TLS (LAN / local use)
-
-```bash
-brave-browser --sync-url=http://<server-ip>:8295/litesync
-```
-
-### With TLS via Nginx
+## 7. Point Brave Browser at the Server
 
 ```bash
 brave-browser --sync-url=https://sync.example.com/litesync
@@ -321,7 +259,7 @@ brave-browser --sync-url=https://sync.example.com/litesync
 
 ---
 
-## 9. Maintenance
+## 8. Maintenance
 
 ### View logs
 
@@ -349,10 +287,10 @@ curl -fsSL \
   -o /tmp/litesync
 
 curl -fsSL \
-  "https://github.com/ZenTenApp/litesync/releases/download/${VERSION}/checksums.txt" \
-  -o /tmp/checksums.txt
+  "https://github.com/ZenTenApp/litesync/releases/download/${VERSION}/litesync-linux-${ARCH}.sha256" \
+  -o /tmp/litesync.sha256
 
-cd /tmp && grep "litesync-linux-${ARCH}" checksums.txt | sha256sum --check
+cd /tmp && sha256sum --check litesync.sha256
 
 # Install
 sudo systemctl stop litesync

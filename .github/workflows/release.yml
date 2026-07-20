@@ -75,10 +75,12 @@ jobs:
             -o dist/litesync-linux-arm64 \
             ./cmd/litesync
 
-      # ── Checksum file ───────────────────────────────────────────────────────
+      # ── Checksum files (one per arch) ───────────────────────────────────────
       - name: Generate SHA-256 checksums
         working-directory: dist
-        run: sha256sum litesync-linux-amd64 litesync-linux-arm64 > checksums.txt
+        run: |
+          sha256sum litesync-linux-amd64 > litesync-linux-amd64.sha256
+          sha256sum litesync-linux-arm64 > litesync-linux-arm64.sha256
 
       # ── Create GitHub Release ───────────────────────────────────────────────
       - name: Create GitHub Release
@@ -89,5 +91,6 @@ jobs:
           generate_release_notes: true
           files: |
             dist/litesync-linux-amd64
+            dist/litesync-linux-amd64.sha256
             dist/litesync-linux-arm64
-            dist/checksums.txt
+            dist/litesync-linux-arm64.sha256
