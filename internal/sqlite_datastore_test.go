@@ -171,6 +171,11 @@ func TestUpdateSyncEntity(t *testing.T) {
 	assert.False(t, conflict)
 	assert.False(t, deleted)
 
+	var dataTypeMtime string
+	err = ds.Db.QueryRow("SELECT data_type_mtime FROM sync_entities WHERE client_id = ? AND id = ?", entity.ClientID, entity.ID).Scan(&dataTypeMtime)
+	assert.NoError(t, err)
+	assert.Equal(t, "123#12345678", dataTypeMtime)
+
 	// Update with incorrect oldVersion (conflict)
 	entity.Version = aws.Int64(3)
 	conflict, deleted, err = ds.UpdateSyncEntity(&entity, 1)

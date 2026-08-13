@@ -19,7 +19,8 @@ A self-hosted Brave sync server backed by SQLite3 and an in-memory cache.
     - [6.1 Install Nginx and Certbot](#61-install-nginx-and-certbot)
     - [6.2 Create the Nginx site](#62-create-the-nginx-site)
     - [6.3 Obtain a TLS certificate](#63-obtain-a-tls-certificate)
-    - [6.4 Reload Nginx](#64-reload-nginx)
+    - [6.4 Configure CORS for a Web App](#64-configure-cors-for-a-web-app)
+    - [6.5 Reload Nginx](#65-reload-nginx)
   - [7. Point Brave Browser at the Server](#7-point-brave-browser-at-the-server)
   - [8. Maintenance](#8-maintenance)
     - [View logs](#view-logs)
@@ -234,9 +235,93 @@ sudo nginx -t
 sudo certbot --nginx -d "$Replace_with_your_domain" --non-interactive --agree-tos -m "$Replace_with_your_email"
 ```
 
-### 6.4 Reload Nginx
+### 6.4 Configure CORS for a Web App
+
+If a browser-based web app needs to call litesync from a different origin, configure
+an explicit allowlist in Nginx. This handles both CORS response headers and the
+browser's `OPTIONS` preflight request (commonly triggered by the `Authorization`
+header).
+
+Create `/etc/nginx/conf.d/litesync-cors.conf`:
 
 ```bash
+sudo tee /etc/nginx/conf.d/litesync-cors.conf > /dev/null << 'NGINX_EOF'
+# Only origins listed here receive CORS response headers.
+map $http_origin $cors_allow_origin {
+    default "";
+    "https://app.example.com" $http_origin;
+    # "https://staging.app.example.com" $http_origin;
+}
+NGINX_EOF
+```
+
+Replace `https://app.example.com` with the exact origin of the calling web app.
+An origin includes the scheme, hostname, and port when applicable; do not include
+a trailing slash.
+
+Then add the following directives inside the `server { ... }` block created above:
+
+```nginx
+# Returned only when the request Origin is in the allowlist above.
+add_header Access-Control-Allow-Origin $cors_allow_origin always;
+add_header Access-Control-Allow-Methods "POST, OPTIONS" always;
+add_header Access-Control-Allow-Headers "Authorization, Content-Type" always;
+add_header Vary "Origin" always;
+```
+
+Add this preflight handler at the beginning of the existing `location / { ... }`
+block, before `proxy_pass`:
+
+```nginx
+# Respond to CORS preflight requests without sending them to litesync.
+if ($request_method = OPTIONS) {
+    return 204;
+}
+```
+
+For example, the relevant parts of the site configuration should look like this:
+
+```nginx
+server {
+    server_name sync.example.com;
+
+    # These headers are returned for both OPTIONS preflight and actual POST responses.
+    add_header Access-Control-Allow-Origin $cors_allow_origin always;
+    add_header Access-Control-Allow-Methods "POST, OPTIONS" always;
+    add_header Access-Control-Allow-Headers "Authorization, Content-Type, BraveServiceKey, Cache-Control, Pragma" always;
+    add_header Access-Control-Max-Age 86400 always;
+    add_header Vary "Origin" always;
+
+    location / {
+        if ($request_method = OPTIONS) {
+            return 204;
+        }
+
+        proxy_pass http://127.0.0.1:8295;
+        # ...retain the existing proxy_* directives...
+    }
+}
+```
+
+Do not use `Access-Control-Allow-Origin: *` for a sync service. If the sync
+endpoint uses HTTPS, the calling web app must also use HTTPS to avoid mixed-content
+blocking.
+
+You can verify the preflight response after reloading Nginx:
+
+```bash
+curl -i -X OPTIONS 'https://sync.example.com/litesync/command/' \
+  -H 'Origin: https://app.example.com' \
+  -H 'Access-Control-Request-Method: POST' \
+  -H 'Access-Control-Request-Headers: authorization,content-type'
+```
+
+The response should include `Access-Control-Allow-Origin` with the allowed origin.
+
+### 6.5 Reload Nginx
+
+```bash
+sudo nginx -t
 sudo systemctl reload nginx
 ```
 
