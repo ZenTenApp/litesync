@@ -50,12 +50,14 @@ Releases are built automatically by the GitHub Actions workflow
 (`.github/workflows/release.yml`) and published to the
 [Releases page](https://github.com/ZenTenApp/litesync/releases).
 
-### Determine your architecture
+### Architecture
+
+The release binary is currently provided for `amd64` servers only. Verify that your
+server uses that architecture:
 
 ```bash
 dpkg --print-architecture
-# amd64  →  use litesync-linux-amd64
-# arm64  →  use litesync-linux-arm64
+# amd64
 ```
 
 ### Download and verify
@@ -63,7 +65,7 @@ dpkg --print-architecture
 ```bash
 # Set the version you want to install (check the Releases page for the latest)
 VERSION="v1.0.0"
-ARCH="amd64"   # or arm64
+ARCH="amd64"
 
 # Download binary and checksum file
 curl -fsSL \
@@ -364,7 +366,7 @@ sudo journalctl -u litesync -b
 ```bash
 # Set the new version
 VERSION="v1.1.0"
-ARCH="amd64"   # or arm64
+ARCH="amd64"
 
 # Download and verify
 curl -fsSL \
