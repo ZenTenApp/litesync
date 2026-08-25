@@ -159,6 +159,10 @@ func setupRouter(ctx context.Context, logger *zerolog.Logger, dbPath string, rat
 		r.Use(rateLimiter.middleware())
 	}
 	r.Use(syncMiddleware.DisabledChain)
+	// Passwords-only + per-entity size policy. Runs before the controller so
+	// rejected data never touches the database. It reads and re-serves the
+	// request body, so it must sit before the terminal controller handler.
+	r.Use(newEntityPolicy(loadEntityPolicyConfig()).middleware())
 	r.Method("POST", "/command/", controller.Command(cacheInstance, sqliteStore))
 	router.Mount("/litesync", r)
 

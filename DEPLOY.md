@@ -23,6 +23,7 @@ A self-hosted Brave sync server backed by SQLite3 and an in-memory cache.
     - [6.5 Reload Nginx](#65-reload-nginx)
     - [6.6 Rate limiting](#66-rate-limiting)
     - [6.7 SQLite durability & concurrency](#67-sqlite-durability--concurrency)
+    - [6.8 Passwords-only entity policy](#68-passwords-only-entity-policy)
   - [7. Point Brave Browser at the Server](#7-point-brave-browser-at-the-server)
   - [8. Maintenance](#8-maintenance)
     - [View logs](#view-logs)
@@ -445,6 +446,53 @@ already satisfied by the systemd unit (`ReadWritePaths=/var/lib/litesync`).
 A new deployment gets these for free. For an **existing** deployment, restarting
 litesync after this change will migrate the journal to WAL automatically (the
 `-wal`/`-shm` sidecar files appear next to `litesync.sqlite`).
+
+---
+
+## 6.8 Passwords-only entity policy
+
+This server is intentionally a **passwords-only** Brave sync store. Every COMMIT
+is validated before it touches the database and rejected if it violates the
+policy. Two data types are allowed:
+
+- **PASSWORD** (data type `45873`) — the product surface we store.
+- **NIGORI** (data type `47745`) — always allowed because every client creates
+  this encryption-settings entity on `connect()`; blocking it would stop clients
+  from initialising their chain at all.
+
+Everything else — bookmarks, history, autofill, 2FA/authenticator, preferences,
+etc. — is **rejected on commit** with `HTTP 400`. Read requests (GetUpdates) for
+other types are not blocked; they simply return whatever exists (no unrelated
+entities are ever stored, so that is nothing).
+
+An optional **size cap** bounds each stored password entity's marshalled
+`Specifics` blob at **1KB by default**, configurable via env on the systemd unit:
+
+| Env var | Default | Meaning |
+|---|---|---|---|
+| `LITESYNC_MAX_PASSWORD_SIZE` | `1024` | max bytes per password entity's Specifics; `-1` disables |
+
+Oversize entities are rejected with `HTTP 400` (e.g.
+`rejected: password entity too large (6133 bytes > 1024 byte limit)`). Note: a
+password synced with a large note field can exceed the cap; raise it if you need
+notes. To tune:
+
+```bash
+sudo systemctl edit litesync
+```
+
+```ini
+[Service]
+Environment=LITESYNC_MAX_PASSWORD_SIZE=2048
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart litesync
+```
+
+The policy lives in `internal/entity_policy.go` and is wired into the router
+before the sync controller, so rejected data never reaches the database.
 
 ---
 
