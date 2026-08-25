@@ -13,6 +13,7 @@ UNIT_PATH="/etc/systemd/system/$SERVICE.service"
 NGINX_SITE="/etc/nginx/sites-available/$SERVICE"
 NGINX_ENABLED="/etc/nginx/sites-enabled/$SERVICE"
 CORS_CONFIG="/etc/nginx/conf.d/$SERVICE-cors.conf"
+LIMIT_CONFIG="/etc/nginx/conf.d/$SERVICE-limit.conf"
 
 red() { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -157,15 +158,33 @@ else
   PREFLIGHT=""
 fi
 
+cat > "$LIMIT_CONFIG" <<EOF
+# Rate limiting for $SERVICE (Brave sync). Zones live in the http context
+# (shared across vhosts) and are applied per-location below.
+#
+# Tune for your traffic. litesync is a single-SQLite-file server with no app-
+# level backpressure on its write path, so nginx is the first choke point.
+# Defaults keep a single client comfortable while bounding floods/abuse.
+
+# Per-IP request rate: 20 req/s baseline; burst absorbs initial-sync chatter.
+limit_req_zone \$binary_remote_addr zone=brave_req:10m rate=20r/s;
+
+# Per-IP concurrent connection cap: 300. Stops one host exhausting nginx
+# worker connections with hundreds of concurrent syncs.
+limit_conn_zone \$binary_remote_addr zone=brave_conn:10m;
+EOF
+
 cat > "$NGINX_SITE" <<EOF
 server {
     listen 80;
     listen [::]:80;
     server_name $DOMAIN;
+    limit_conn brave_conn 300;
 $CORS_HEADERS
 
     location / {
-$PREFLIGHT        proxy_pass http://127.0.0.1:8295;
+$PREFLIGHT        limit_req zone=brave_req burst=60 nodelay;
+        proxy_pass http://127.0.0.1:8295;
         proxy_http_version 1.1;
         proxy_read_timeout 70s;
         proxy_set_header Host \$host;

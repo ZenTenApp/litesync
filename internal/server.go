@@ -34,7 +34,10 @@ func StartServer(bindAddr, dbPath string) error {
 	ctx := context.Background()
 	ctx, logger := setupLogger(ctx)
 
-	ctx, router, err := setupRouter(ctx, logger, dbPath)
+	rateLimiter := newRateLimiter(loadRateLimitConfig(), logger)
+	defer rateLimiter.close()
+
+	ctx, router, err := setupRouter(ctx, logger, dbPath, rateLimiter)
 	if err != nil {
 		return fmt.Errorf("failed to setup router: %w", err)
 	}
@@ -115,7 +118,7 @@ func setupLogger(ctx context.Context) (context.Context, *zerolog.Logger) {
 }
 
 // setupRouter configures the HTTP router with middleware and routes.
-func setupRouter(ctx context.Context, logger *zerolog.Logger, dbPath string) (context.Context, chi.Router, error) {
+func setupRouter(ctx context.Context, logger *zerolog.Logger, dbPath string, rateLimiter *rateLimiter) (context.Context, chi.Router, error) {
 	router := chi.NewRouter()
 
 	// Middleware setup
@@ -147,8 +150,14 @@ func setupRouter(ctx context.Context, logger *zerolog.Logger, dbPath string) (co
 	ctx = context.WithValue(ctx, syncContext.ContextKeyDatastore, sqliteStore)
 	ctx = context.WithValue(ctx, syncContext.ContextKeyCache, &cacheInstance)
 
+	// Rate limiting middleware: per-IP and per-client_id token buckets, tunable
+	// via LITESYNC_IP_RATE / LITESYNC_CLIENT_RATE env vars (rate_limit.go). It
+	// MUST run after Auth so the authenticated client_id is in context.
 	r := chi.NewRouter()
 	r.Use(syncMiddleware.Auth)
+	if rateLimiter != nil {
+		r.Use(rateLimiter.middleware())
+	}
 	r.Use(syncMiddleware.DisabledChain)
 	r.Method("POST", "/command/", controller.Command(cacheInstance, sqliteStore))
 	router.Mount("/litesync", r)
