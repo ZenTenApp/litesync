@@ -21,6 +21,9 @@ A self-hosted Brave sync server backed by SQLite3 and an in-memory cache.
     - [6.3 Obtain a TLS certificate](#63-obtain-a-tls-certificate)
     - [6.4 Configure CORS for a Web App](#64-configure-cors-for-a-web-app)
     - [6.5 Reload Nginx](#65-reload-nginx)
+    - [6.6 Rate limiting](#66-rate-limiting)
+    - [6.7 SQLite durability & concurrency](#67-sqlite-durability--concurrency)
+    - [6.8 Passwords-only entity policy](#68-passwords-only-entity-policy)
   - [7. Point Brave Browser at the Server](#7-point-brave-browser-at-the-server)
   - [8. Maintenance](#8-maintenance)
     - [View logs](#view-logs)
@@ -332,6 +335,164 @@ Certbot will automatically renew the certificate. Verify the renewal timer:
 ```bash
 sudo systemctl status certbot.timer
 ```
+
+---
+
+## 6.6 Rate limiting
+
+_Applied automatically by `deploy.sh` (it writes `/etc/nginx/conf.d/litesync-limit.conf`
+and adds `limit_req`/`limit_conn` to the site). Two layers: nginx first, then the
+application._
+
+### 6.6.1 Layer 1 — Nginx (external IP + connection flood shield)
+
+`deploy.sh` installs two zones (http context) and applies them to the site:
+
+```nginx
+# /etc/nginx/conf.d/litesync-limit.conf
+limit_req_zone $binary_remote_addr zone=brave_req:10m rate=20r/s;
+limit_conn_zone $binary_remote_addr zone=brave_conn:10m;
+```
+
+```nginx
+# within the litesync server block
+limit_conn brave_conn 300;
+location / {
+    limit_req zone=brave_req burst=60 nodelay;
+    # ...proxy directives...
+}
+```
+
+- `limit_req` caps each source IP at ~20 requests/sec baseline, absorbing a burst
+  of 60 instantly (`nodelay`) before excess requests get HTTP `503` + a
+  `Retry-After` header. A generous allowance for one Brave client (whose initial
+  sync is chatty) while bounding floods.
+- `limit_conn` caps each source IP at 300 concurrent connections, stopping one
+  host from exhausting nginx worker connections with hundreds of parallel syncs.
+- Because litesync binds `127.0.0.1` behind nginx, `$binary_remote_addr` is the
+  true client IP; do **not** key limits on `X-Forwarded-For` without a
+  trusted-proxy allowlist (it is spoofable).
+
+**Why this matters:** stress tests showed litesync's single SQLite file fails
+with `database is locked` under ~90 concurrent write clients, and older binaries
+have no app-level rate limiting. nginx shedding work before it reaches the DB is
+the first line of defense.
+
+**Caveat:** nginx limiting is coarse (per-IP). An attacker who can rotate BIP39
+seeds / client identities defeats per-IP limits — which is why the app-layer
+limiter below exists.
+
+### 6.6.2 Layer 2 — litesync app (per client_id + per IP token bucket)
+
+The server now ships a built-in token-bucket rate limiter, enabled by default.
+It runs **after** Brave sync authentication, so it enforces a real per-identity
+(Brave `client_id`, i.e. the sync seed) limit in addition to a source-IP limit —
+the layer that stops seed-rotation abuse.
+
+Defaults (overridable by env vars on the `systemd` unit):
+
+| Env var | Default | Meaning |
+|---|---|---|---|
+| `LITESYNC_IP_RATE` | `30` | req/sec per source IP |
+| `LITESYNC_IP_BURST` | `90` | burst per source IP |
+| `LITESYNC_CLIENT_RATE` | `5` | req/sec per Brave `client_id` (seed) |
+| `LITESYNC_CLIENT_BURST` | `20` | burst per Brave `client_id` |
+
+Excess requests get `HTTP 429 Too Many Requests` + `Retry-After: 1` and are
+logged (`rate limited by IP` / `by client_id`). A `rate <= 0` disables that
+dimension (useful for local development). Note: memory is bounded because idle
+keys are swept after 10 minutes, so endlessly rotating seeds cannot exhaust
+memory.
+
+To tune them, edit the unit and add an override:
+
+```bash
+sudo systemctl edit litesync
+```
+
+```ini
+[Service]
+Environment=LITESYNC_CLIENT_RATE=8
+Environment=LITESYNC_CLIENT_BURST=30
+```
+
+Then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart litesync
+```
+
+---
+
+## 6.7 SQLite durability & concurrency
+
+`internal/sqlite_datastore.go` now opens the database with WAL journal mode and a
+busy timeout, applied to **every** pooled connection via the DSN (not one-off
+PRAGMA calls, which would only affect a single connection):
+
+- `journal_mode=WAL` — readers don't block writers and vice-versa.
+- `busy_timeout=5000` — concurrent commits **wait** up to 5s for the lock instead
+  of failing instantly with `SQLITE_BUSY` (`database is locked`). This is the
+  root-cause fix for the write-contention errors seen under load.
+- `synchronous=NORMAL` — safe under WAL, reduces fsync frequency for commits.
+
+**Measured impact** (local, rate limiting disabled): concurrent write throughput
+jumped from ~45–50 ops/s with ~13% `database is locked` failures at ~90 clients
+to **~476 ops/s with 0 errors at 120 concurrent writers**; write p99 latency
+dropped from ~3.7s to ~293ms. WAL mode requires read/write on the data directory;
+already satisfied by the systemd unit (`ReadWritePaths=/var/lib/litesync`).
+
+A new deployment gets these for free. For an **existing** deployment, restarting
+litesync after this change will migrate the journal to WAL automatically (the
+`-wal`/`-shm` sidecar files appear next to `litesync.sqlite`).
+
+---
+
+## 6.8 Passwords-only entity policy
+
+This server is intentionally a **passwords-only** Brave sync store. Every COMMIT
+is validated before it touches the database and rejected if it violates the
+policy. Two data types are allowed:
+
+- **PASSWORD** (data type `45873`) — the product surface we store.
+- **NIGORI** (data type `47745`) — always allowed because every client creates
+  this encryption-settings entity on `connect()`; blocking it would stop clients
+  from initialising their chain at all.
+
+Everything else — bookmarks, history, autofill, 2FA/authenticator, preferences,
+etc. — is **rejected on commit** with `HTTP 400`. Read requests (GetUpdates) for
+other types are not blocked; they simply return whatever exists (no unrelated
+entities are ever stored, so that is nothing).
+
+An optional **size cap** bounds each stored password entity's marshalled
+`Specifics` blob at **1KB by default**, configurable via env on the systemd unit:
+
+| Env var | Default | Meaning |
+|---|---|---|---|
+| `LITESYNC_MAX_PASSWORD_SIZE` | `1024` | max bytes per password entity's Specifics; `-1` disables |
+
+Oversize entities are rejected with `HTTP 400` (e.g.
+`rejected: password entity too large (6133 bytes > 1024 byte limit)`). Note: a
+password synced with a large note field can exceed the cap; raise it if you need
+notes. To tune:
+
+```bash
+sudo systemctl edit litesync
+```
+
+```ini
+[Service]
+Environment=LITESYNC_MAX_PASSWORD_SIZE=2048
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart litesync
+```
+
+The policy lives in `internal/entity_policy.go` and is wired into the router
+before the sync controller, so rejected data never reaches the database.
 
 ---
 

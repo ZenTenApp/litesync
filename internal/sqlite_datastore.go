@@ -17,7 +17,16 @@ type SqliteDatastore struct {
 }
 
 func NewSqliteDatastore(filename string) (*SqliteDatastore, error) {
-	db, err := sql.Open("sqlite3", filename)
+	// Use DSN parameters (applied by the driver to EVERY pooled connection),
+	// not one-off PRAGMA execs (which would only affect a single connection):
+	// - _journal_mode=WAL : readers don't block writers and vice-versa.
+	// - _busy_timeout=5000 : concurrent commits WAIT for the lock instead of
+	//   failing instantly with SQLITE_BUSY ("database is locked"). This turns
+	//   write-contention failures observed under load into brief, successful
+	//   waits and is the root-cause fix for the lock cliff.
+	// - _synchronous=NORMAL : safe for WAL, drops fsync frequency for commits.
+	dsn := filename + "?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL"
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err
 	}
