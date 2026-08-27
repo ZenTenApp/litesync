@@ -1,0 +1,10 @@
+# Keep the Go build context clean so version stamping reports exactly the
+# tag (not "+dirty") and so build/scratch artifacts don't leak into the image.
+.git
+dist
+Dockerfile.build
+.dockerignore
+out/
+tmp/
+*.sqlite
+*.sha256
