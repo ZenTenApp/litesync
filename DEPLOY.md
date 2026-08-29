@@ -466,14 +466,14 @@ other types are not blocked; they simply return whatever exists (no unrelated
 entities are ever stored, so that is nothing).
 
 An optional **size cap** bounds each stored password entity's marshalled
-`Specifics` blob at **1KB by default**, configurable via env on the systemd unit:
+`Specifics` blob at **2KB by default**, configurable via env on the systemd unit:
 
 | Env var | Default | Meaning |
 |---|---|---|---|
-| `LITESYNC_MAX_PASSWORD_SIZE` | `1024` | max bytes per password entity's Specifics; `-1` disables |
+| `LITESYNC_MAX_PASSWORD_SIZE` | `2048` | max bytes per password entity's Specifics; `-1` disables |
 
 Oversize entities are rejected with `HTTP 400` (e.g.
-`rejected: password entity too large (6133 bytes > 1024 byte limit)`). Note: a
+`rejected: password entity too large (6133 bytes > 2048 byte limit)`). Note: a
 password synced with a large note field can exceed the cap; raise it if you need
 notes. To tune:
 

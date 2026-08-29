@@ -33,7 +33,7 @@ const (
 
 	// defaultMaxPasswordSize is the upper bound (bytes) for a stored password
 	// entity's marshalled `Specifics` blob — the object actually persisted.
-	defaultMaxPasswordSize = 1024
+	defaultMaxPasswordSize = 2 * 1024
 )
 
 // entityPolicyConfig is tunable via env.
