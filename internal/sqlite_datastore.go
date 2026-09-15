@@ -62,10 +62,11 @@ CREATE TABLE IF NOT EXISTS sync_entities (
 )
 `
 
-const createSyncEntityIndex = `
-CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_client_tag
+const migrateSyncEntityIndex = `
+DROP INDEX IF EXISTS idx_unique_client_tag;
+CREATE UNIQUE INDEX idx_unique_client_tag
 ON sync_entities (client_id, client_defined_unique_tag)
-WHERE client_defined_unique_tag IS NOT NULL
+WHERE client_defined_unique_tag IS NOT NULL AND COALESCE(deleted, 0) = 0
 `
 
 type execFunc func(tx *sql.Tx) (sql.Result, error)
@@ -89,8 +90,9 @@ func (d *SqliteDatastore) CreateTable() error {
 		if _, err := tx.Exec(createTableQuery); err != nil {
 			return nil, err
 		}
-		// Create index
-		if _, err := tx.Exec(createSyncEntityIndex); err != nil {
+		// Tombstones must remain readable by sync clients, but must not reserve
+		// their client tag and prevent the credential from being recreated.
+		if _, err := tx.Exec(migrateSyncEntityIndex); err != nil {
 			return nil, err
 		}
 		return nil, nil // or return the result of the last operation
@@ -117,27 +119,35 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 func (d *SqliteDatastore) InsertSyncEntity(entity *braveds.SyncEntity) (bool, error) {
-	// First, try to insert the main sync entity
-	conflict, err := d.insertMainSyncEntity(entity)
-	if err != nil || conflict {
-		return conflict, err
+	tx, err := d.Db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	if err := insertMainSyncEntity(tx, entity); err != nil {
+		if isUniqueConstraintError(err) {
+			return true, fmt.Errorf("sync entity already exists: %w", err)
+		}
+		return false, err
 	}
 
-	// If entity has a client defined unique tag, also insert the tag item
 	if entity.ClientDefinedUniqueTag != nil {
-		tagConflict, err := d.insertTagItem(entity)
-		if err != nil {
+		if err := insertTagItem(tx, entity); err != nil {
+			if isUniqueConstraintError(err) {
+				return true, fmt.Errorf("client tag already exists: %w", err)
+			}
 			return false, err
 		}
-		if tagConflict {
-			return true, nil
-		}
 	}
 
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
 	return false, nil
 }
 
-func (d *SqliteDatastore) insertMainSyncEntity(entity *braveds.SyncEntity) (bool, error) {
+func insertMainSyncEntity(tx *sql.Tx, entity *braveds.SyncEntity) error {
 	const query = `
         INSERT INTO sync_entities (
             client_id, id, parent_id, version, mtime, ctime, name, non_unique_name,
@@ -146,7 +156,7 @@ func (d *SqliteDatastore) insertMainSyncEntity(entity *braveds.SyncEntity) (bool
             client_defined_unique_tag, unique_position, data_type_mtime, expiration_time
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
-	_, err := d.Db.Exec(query,
+	_, err := tx.Exec(query,
 		entity.ClientID,
 		entity.ID,
 		entity.ParentID,
@@ -168,20 +178,12 @@ func (d *SqliteDatastore) insertMainSyncEntity(entity *braveds.SyncEntity) (bool
 		entity.ExpirationTime,
 	)
 
-	if err != nil {
-		// Check if it's a conflict (duplicate key) error
-		if isUniqueConstraintError(err) {
-			return true, nil
-		}
-		return false, err
-	}
-
-	return false, nil
+	return err
 }
 
-func (d *SqliteDatastore) insertTagItem(entity *braveds.SyncEntity) (bool, error) {
+func insertTagItem(tx *sql.Tx, entity *braveds.SyncEntity) error {
 	if entity.ClientDefinedUniqueTag == nil {
-		return false, nil
+		return nil
 	}
 
 	const query = `
@@ -200,22 +202,14 @@ func (d *SqliteDatastore) insertTagItem(entity *braveds.SyncEntity) (bool, error
 		ctime = &now
 	}
 
-	_, err := d.Db.Exec(query,
+	_, err := tx.Exec(query,
 		entity.ClientID,
 		"Client#"+*entity.ClientDefinedUniqueTag, // Construct the tag ID
 		mtime,
 		ctime,
 	)
 
-	if err != nil {
-		// Check if it's a conflict (duplicate key) error
-		if isUniqueConstraintError(err) {
-			return true, nil
-		}
-		return false, err
-	}
-
-	return false, nil
+	return err
 }
 
 func isUniqueConstraintError(err error) bool {

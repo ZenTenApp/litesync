@@ -79,6 +79,12 @@ func TestInsertSyncEntity(t *testing.T) {
 	conflict, err := ds.InsertSyncEntity(&entity4Copy)
 	assert.Error(t, err, "InsertSyncEntity with the same client tag and ClientID should fail")
 	assert.True(t, conflict, "Return conflict for duplicate client tag")
+	var orphanExists bool
+	err = ds.Db.QueryRow(
+		"SELECT EXISTS(SELECT 1 FROM sync_entities WHERE client_id = ? AND id = ?)",
+		entity4Copy.ClientID, entity4Copy.ID).Scan(&orphanExists)
+	assert.NoError(t, err)
+	assert.False(t, orphanExists, "conflicting insert must roll back the entity row")
 
 	// Insert entity with the same client tag for other client should not fail.
 	entity5 := entity3
@@ -87,6 +93,26 @@ func TestInsertSyncEntity(t *testing.T) {
 	_, err = ds.InsertSyncEntity(&entity5)
 	assert.NoError(t, err,
 		"InsertSyncEntity with the same client tag for another client should succeed")
+}
+
+func TestCreateTableMigratesClientTagIndex(t *testing.T) {
+	ds, err := internal.NewSqliteDatastore(":memory:")
+	assert.NoError(t, err)
+
+	_, err = ds.Db.Exec(`
+		DROP INDEX idx_unique_client_tag;
+		CREATE UNIQUE INDEX idx_unique_client_tag
+		ON sync_entities (client_id, client_defined_unique_tag)
+		WHERE client_defined_unique_tag IS NOT NULL`)
+	assert.NoError(t, err)
+	assert.NoError(t, ds.CreateTable())
+
+	var definition string
+	err = ds.Db.QueryRow(
+		"SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_unique_client_tag'",
+	).Scan(&definition)
+	assert.NoError(t, err)
+	assert.Contains(t, definition, "COALESCE(deleted, 0) = 0")
 }
 
 func TestInsertSyncEntitiesWithServerTags(t *testing.T) {
@@ -205,4 +231,27 @@ func TestUpdateSyncEntity(t *testing.T) {
 	assert.NoError(t, err)
 	assert.False(t, conflict)
 	assert.True(t, deleted)
+
+	// Recreating the same logical credential uses the same client tag but a
+	// fresh server ID. The deleted row remains as a sync tombstone and must not
+	// block the replacement.
+	recreated := entityWithClientTag
+	recreated.ID = "id3"
+	recreated.Version = aws.Int64(3)
+	recreated.Deleted = aws.Bool(false)
+	conflict, err = ds.InsertSyncEntity(&recreated)
+	assert.NoError(t, err)
+	assert.False(t, conflict)
+
+	var active, tombstones int
+	err = ds.Db.QueryRow(`
+		SELECT
+			SUM(CASE WHEN COALESCE(deleted, 0) = 0 THEN 1 ELSE 0 END),
+			SUM(CASE WHEN deleted = 1 THEN 1 ELSE 0 END)
+		FROM sync_entities
+		WHERE client_id = ? AND client_defined_unique_tag = ?`,
+		recreated.ClientID, *recreated.ClientDefinedUniqueTag).Scan(&active, &tombstones)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, active)
+	assert.Equal(t, 1, tombstones)
 }
