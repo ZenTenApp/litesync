@@ -153,6 +153,7 @@ func (p *entityPolicy) middleware() func(http.Handler) http.Handler {
 						http.Error(w, err.Error(), http.StatusBadRequest)
 						return
 					}
+					r = r.WithContext(markCommitRequest(r.Context()))
 				}
 			}
 

@@ -349,6 +349,24 @@ FROM sync_entities
 WHERE client_id = ? AND COALESCE(deleted, 0) = 0
 `
 
+const countLivePasswordsQuery = `
+SELECT COUNT(*)
+FROM sync_entities
+WHERE client_id = ? AND data_type = ? AND COALESCE(deleted, 0) = 0
+`
+
+// CountLivePasswords returns the real number of non-deleted passwords stored
+// for a client.
+func (d SqliteDatastore) CountLivePasswords(clientID string) (int, error) {
+	var n int
+	err := d.Db.QueryRowContext(context.Background(), countLivePasswordsQuery,
+		clientID, passwordDataType).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count live passwords: %w", err)
+	}
+	return n, nil
+}
+
 // GetClientItemCount feeds go-sync's per-client object quota. ItemCount is
 // shifted so the upstream check enforces MaxPasswords (see password_quota.go).
 func (d SqliteDatastore) GetClientItemCount(clientID string) (*braveds.ClientItemCounts, error) {

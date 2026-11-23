@@ -509,9 +509,10 @@ until they drop below the limit.
 
 Unlike the size cap, this does not answer with `HTTP 400`. It reuses go-sync's
 built-in object quota, so each extra password gets an `OVER_QUOTA` commit response
-while the rest of the commit succeeds. The upstream quota message reports an
-internal adjusted count ("There are already N non-deleted objects in store"),
-not the real number of passwords. Set it the same way as
+while the rest of the commit succeeds. The refused entry's error message states
+the seed's real count, e.g.
+`Password limit reached: this sync chain has 120 of 120 allowed passwords`.
+Set it the same way as
 `LITESYNC_MAX_PASSWORD_SIZE` above
 (`Environment=LITESYNC_MAX_PASSWORDS=120`). Implementation:
 `internal/password_quota.go`.

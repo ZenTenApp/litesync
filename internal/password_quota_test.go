@@ -1,11 +1,17 @@
 package internal
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/brave/go-sync/cache"
 	"github.com/brave/go-sync/command"
+	syncContext "github.com/brave/go-sync/context"
+	"github.com/brave/go-sync/controller"
 	"github.com/brave/go-sync/schema/protobuf/sync_pb"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -179,4 +185,52 @@ func TestLoadMaxPasswords(t *testing.T) {
 	require.Equal(t, 500, loadMaxPasswords())
 	t.Setenv("LITESYNC_MAX_PASSWORDS", "-1")
 	require.Equal(t, -1, loadMaxPasswords())
+}
+
+// commitOverHTTP sends a commit through the production middleware order
+// (entity policy -> quota messages -> go-sync controller).
+func (h *quotaHarness) commitOverHTTP(entries ...*sync_pb.SyncEntity) []*sync_pb.CommitResponse_EntryResponse {
+	h.t.Helper()
+	contents := sync_pb.ClientToServerMessage_COMMIT
+	raw, err := proto.Marshal(&sync_pb.ClientToServerMessage{
+		Share:           proto.String(""),
+		MessageContents: &contents,
+		Commit:          &sync_pb.CommitMessage{Entries: entries, CacheGuid: proto.String("cache-guid")},
+	})
+	require.NoError(h.t, err)
+
+	handler := newEntityPolicy(loadEntityPolicyConfig()).middleware()(
+		passwordQuotaMessages(h.ds)(controller.Command(h.cache, h.ds)))
+
+	req := httptest.NewRequest(http.MethodPost, "/command/", bytes.NewReader(raw))
+	req = req.WithContext(context.WithValue(req.Context(), syncContext.ContextKeyClientID, quotaTestClient))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	require.Equal(h.t, http.StatusOK, w.Code, w.Body.String())
+
+	rsp := &sync_pb.ClientToServerResponse{}
+	require.NoError(h.t, proto.Unmarshal(w.Body.Bytes(), rsp))
+	return rsp.GetCommit().GetEntryresponse()
+}
+
+func TestPasswordQuota_OverQuotaMessageStatesRealCount(t *testing.T) {
+	h := newQuotaHarness(t, 2)
+	rsps := h.commitOverHTTP(quotaNewPasswords("pw", 3)...)
+	require.Len(t, rsps, 3)
+	require.Equal(t, sync_pb.CommitResponse_SUCCESS, rsps[0].GetResponseType())
+	require.Equal(t, sync_pb.CommitResponse_SUCCESS, rsps[1].GetResponseType())
+	require.Equal(t, sync_pb.CommitResponse_OVER_QUOTA, rsps[2].GetResponseType())
+	require.Equal(t,
+		"Password limit reached: this sync chain has 2 of 2 allowed passwords",
+		rsps[2].GetErrorMessage())
+}
+
+func TestPasswordQuota_SuccessfulCommitResponseUnchanged(t *testing.T) {
+	h := newQuotaHarness(t, 5)
+	rsps := h.commitOverHTTP(quotaNewPasswords("pw", 2)...)
+	require.Len(t, rsps, 2)
+	for _, r := range rsps {
+		require.Equal(t, sync_pb.CommitResponse_SUCCESS, r.GetResponseType())
+		require.Empty(t, r.GetErrorMessage())
+	}
 }

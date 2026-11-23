@@ -165,6 +165,9 @@ func setupRouter(ctx context.Context, logger *zerolog.Logger, dbPath string, rat
 	// rejected data never touches the database. It reads and re-serves the
 	// request body, so it must sit before the terminal controller handler.
 	r.Use(newEntityPolicy(loadEntityPolicyConfig()).middleware())
+	// States the real password count in OVER_QUOTA messages. Must follow the
+	// entity policy, which marks commit requests.
+	r.Use(passwordQuotaMessages(sqliteStore))
 	r.Method("POST", "/command/", controller.Command(cacheInstance, sqliteStore))
 	router.Mount("/litesync", r)
 
