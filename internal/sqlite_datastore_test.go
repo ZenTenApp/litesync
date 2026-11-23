@@ -29,7 +29,7 @@ func TestInsertion(t *testing.T) {
 
 	count, err := ds.GetClientItemCount(se.ClientID)
 	assert.NoError(t, err, "can't have an error here")
-	assert.Equal(t, count, 1, "we inserted a single row")
+	assert.Equal(t, 1, count.ItemCount, "we inserted a single row")
 }
 
 func TestInsertSyncEntity(t *testing.T) {

@@ -14,6 +14,10 @@ import (
 type SqliteDatastore struct {
 	braveds.Datastore
 	Db *sql.DB
+
+	// MaxPasswords caps live passwords per client_id via the upstream object
+	// quota (see password_quota.go). Negative disables the cap.
+	MaxPasswords int
 }
 
 func NewSqliteDatastore(filename string) (*SqliteDatastore, error) {
@@ -30,7 +34,7 @@ func NewSqliteDatastore(filename string) (*SqliteDatastore, error) {
 	if err != nil {
 		return nil, err
 	}
-	ds := &SqliteDatastore{Db: db}
+	ds := &SqliteDatastore{Db: db, MaxPasswords: -1}
 	if err := ds.CreateTable(); err != nil {
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
@@ -69,6 +73,12 @@ ON sync_entities (client_id, client_defined_unique_tag)
 WHERE client_defined_unique_tag IS NOT NULL AND COALESCE(deleted, 0) = 0
 `
 
+// Serves the per-commit live-item count used by the password quota.
+const createClientTypeIndex = `
+CREATE INDEX IF NOT EXISTS idx_client_data_type
+ON sync_entities (client_id, data_type)
+`
+
 type execFunc func(tx *sql.Tx) (sql.Result, error)
 
 func (d *SqliteDatastore) ExecInTransaction(proxied execFunc) (*sql.Result, error) {
@@ -93,6 +103,9 @@ func (d *SqliteDatastore) CreateTable() error {
 		// Tombstones must remain readable by sync clients, but must not reserve
 		// their client tag and prevent the credential from being recreated.
 		if _, err := tx.Exec(migrateSyncEntityIndex); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(createClientTypeIndex); err != nil {
 			return nil, err
 		}
 		return nil, nil // or return the result of the last operation
@@ -327,24 +340,28 @@ func (d *SqliteDatastore) UpdateSyncEntity(se *braveds.SyncEntity, oldVersion in
 	return false, delete, nil
 }
 
+// Live (non-deleted) entities for a client: all types, and passwords only.
 const getClientItemCountQuery = `
-SELECT COUNT(*)
+SELECT
+	COUNT(*),
+	COALESCE(SUM(CASE WHEN data_type = ? THEN 1 ELSE 0 END), 0)
 FROM sync_entities
-WHERE client_id = ?
+WHERE client_id = ? AND COALESCE(deleted, 0) = 0
 `
 
+// GetClientItemCount feeds go-sync's per-client object quota. ItemCount is
+// shifted so the upstream check enforces MaxPasswords (see password_quota.go).
 func (d SqliteDatastore) GetClientItemCount(clientID string) (*braveds.ClientItemCounts, error) {
-	tx, err := d.Db.BeginTx(context.Background(), nil)
+	var liveTotal, livePasswords int
+	err := d.Db.QueryRowContext(context.Background(), getClientItemCountQuery,
+		passwordDataType, clientID).Scan(&liveTotal, &livePasswords)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("count client items: %w", err)
 	}
-	var count braveds.ClientItemCounts
-	row := tx.QueryRow(getClientItemCountQuery, clientID)
-	row.Scan(&count)
-	if err = tx.Commit(); err != nil {
-		return nil, err
-	}
-	return &count, nil
+	return &braveds.ClientItemCounts{
+		ClientID:  clientID,
+		ItemCount: quotaItemCount(d.MaxPasswords, livePasswords, liveTotal),
+	}, nil
 }
 
 func (d SqliteDatastore) GetUpdatesForType(dataType int, clientToken int64, fetchFolders bool, clientID string, maxSize int64) (bool, []braveds.SyncEntity, error) {

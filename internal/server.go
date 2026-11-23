@@ -142,6 +142,8 @@ func setupRouter(ctx context.Context, logger *zerolog.Logger, dbPath string, rat
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create sqlite datastore: %w", err)
 	}
+	// Per-seed password cap, enforced through go-sync's OVER_QUOTA path.
+	sqliteStore.MaxPasswords = loadMaxPasswords()
 
 	// Cache initialization
 	cacheInstance := cache.NewCache(NewFakeRedisClient())

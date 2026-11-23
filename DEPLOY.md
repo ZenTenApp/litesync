@@ -494,6 +494,28 @@ sudo systemctl restart litesync
 The policy lives in `internal/entity_policy.go` and is wired into the router
 before the sync controller, so rejected data never reaches the database.
 
+### Per-seed password limit
+
+Each seed (Brave `client_id`) may store at most **120 live passwords** by default:
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `LITESYNC_MAX_PASSWORDS` | `120` | max non-deleted passwords per seed; `-1` disables |
+
+Only creates are limited. Edits and deletes always succeed, and deleted passwords
+(tombstones) and the NIGORI entity do not count, so deleting a password frees a
+slot. Seeds already over the limit keep their passwords and cannot add new ones
+until they drop below the limit.
+
+Unlike the size cap, this does not answer with `HTTP 400`. It reuses go-sync's
+built-in object quota, so each extra password gets an `OVER_QUOTA` commit response
+while the rest of the commit succeeds. The upstream quota message reports an
+internal adjusted count ("There are already N non-deleted objects in store"),
+not the real number of passwords. Set it the same way as
+`LITESYNC_MAX_PASSWORD_SIZE` above
+(`Environment=LITESYNC_MAX_PASSWORDS=120`). Implementation:
+`internal/password_quota.go`.
+
 ---
 
 ## 7. Point Brave Browser at the Server
