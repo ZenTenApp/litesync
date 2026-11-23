@@ -22,6 +22,7 @@ import (
 	chiware "github.com/go-chi/chi/v5/middleware"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/hlog"
+	zlog "github.com/rs/zerolog/log"
 )
 
 const (
@@ -113,8 +114,30 @@ func StartServer(bindAddr, dbPath string) error {
 // setupLogger configures the application logger with environment-specific settings.
 func setupLogger(ctx context.Context) (context.Context, *zerolog.Logger) {
 	ctx = context.WithValue(ctx, appctx.EnvironmentCTXKey, os.Getenv("ENV"))
-	ctx = context.WithValue(ctx, appctx.LogLevelCTXKey, zerolog.InfoLevel)
-	return logging.SetupLogger(ctx)
+	ctx = context.WithValue(ctx, appctx.LogLevelCTXKey, loadLogLevel())
+	ctx, logger := logging.SetupLogger(ctx)
+
+	// The upstream go-sync controller and middleware log through the zerolog
+	// global logger, which ignores the request context. Adopt our configured
+	// logger there too, so those lines share one stream, format and level
+	// instead of going to stderr as unformatted JSON.
+	zlog.Logger = *logger
+
+	return ctx, logger
+}
+
+// loadLogLevel reads LITESYNC_LOG_LEVEL (debug, info, warn, error, ...) and
+// defaults to info when it is unset, empty or unparseable.
+func loadLogLevel() zerolog.Level {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("LITESYNC_LOG_LEVEL")))
+	if raw == "" {
+		return zerolog.InfoLevel
+	}
+	level, err := zerolog.ParseLevel(raw)
+	if err != nil {
+		return zerolog.InfoLevel
+	}
+	return level
 }
 
 // setupRouter configures the HTTP router with middleware and routes.
@@ -129,10 +152,14 @@ func setupRouter(ctx context.Context, logger *zerolog.Logger, dbPath string, rat
 		router.Use(hlog.NewHandler(*logger))
 		router.Use(hlog.UserAgentHandler("user_agent"))
 		router.Use(hlog.RequestIDHandler("req_id", "Request-Id"))
-		// router.Use(batware.RequestLogger(logger))
-		// router.Use(httplog.RequestLogger(logger))
+		// Access logging must wrap the rest of the stack so it can record the
+		// final status and duration of every request.
+		router.Use(hlog.AccessHandler(logRequest))
 	}
 
+	// Recoverer sits inside the access logger so a panic is turned into a 500
+	// that the access line records, instead of an unlogged connection drop.
+	router.Use(chiware.Recoverer)
 	router.Use(chiware.Timeout(defaultTimeout))
 	router.Use(bearerToken)
 	router.Use(syncMiddleware.CommonResponseHeaders)
@@ -167,6 +194,37 @@ func setupRouter(ctx context.Context, logger *zerolog.Logger, dbPath string, rat
 	router.Mount("/litesync", r)
 
 	return ctx, router, nil
+}
+
+// logRequest emits one structured access-log line per completed request. It
+// uses the request-scoped logger installed by hlog, so fields added by earlier
+// middleware (req_id, user_agent) are already attached.
+func logRequest(r *http.Request, status, size int, duration time.Duration) {
+	// A handler that writes no explicit status sends 200; hlog reports 0 there.
+	if status == 0 {
+		status = http.StatusOK
+	}
+
+	logger := hlog.FromRequest(r)
+
+	var event *zerolog.Event
+	switch {
+	case status >= 500:
+		event = logger.Error()
+	case status >= 400:
+		event = logger.Warn()
+	default:
+		event = logger.Info()
+	}
+
+	event.
+		Str("method", r.Method).
+		Str("path", r.URL.Path).
+		Str("client_ip", clientIP(r)).
+		Int("status", status).
+		Int("bytes", size).
+		Dur("duration", duration).
+		Msg("request")
 }
 
 type bearerTokenKey struct{}

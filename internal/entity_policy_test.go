@@ -3,12 +3,16 @@ package internal
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	syncContext "github.com/brave/go-sync/context"
 	"github.com/brave/go-sync/schema/protobuf/sync_pb"
+	"github.com/rs/zerolog"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -187,6 +191,47 @@ func TestMiddleware_RejectsBookmarkCommit(t *testing.T) {
 	code, reached := doMiddleware(commitMessage(bookmarkEntity()), false)
 	if code != http.StatusBadRequest || reached {
 		t.Fatalf("bookmark commit should be rejected with 400: code=%d reached=%v", code, reached)
+	}
+}
+
+func TestMiddleware_LogsPolicyRejection(t *testing.T) {
+	raw, err := proto.Marshal(commitMessage(bookmarkEntity()))
+	if err != nil {
+		t.Fatalf("test marshal: %v", err)
+	}
+
+	var buf bytes.Buffer
+	p := newEntityPolicy(entityPolicyConfig{maxPasswordSize: 1024})
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("rejected commit must not reach the next handler")
+	})
+
+	r := httptest.NewRequest(http.MethodPost, "/litesync/command/", bytes.NewReader(raw))
+	ctx := zerolog.New(&buf).WithContext(r.Context())
+	ctx = context.WithValue(ctx, syncContext.ContextKeyClientID, "client-abc")
+
+	w := httptest.NewRecorder()
+	p.middleware()(next).ServeHTTP(w, r.WithContext(ctx))
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("code = %d, want 400", w.Code)
+	}
+
+	var entry map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &entry); err != nil {
+		t.Fatalf("expected one JSON log line, got %q: %v", buf.String(), err)
+	}
+	if entry["level"] != "warn" {
+		t.Errorf("level = %v, want warn", entry["level"])
+	}
+	if entry["message"] != "commit rejected by entity policy" {
+		t.Errorf("message = %v", entry["message"])
+	}
+	if entry["client_id"] != "client-abc" {
+		t.Errorf("client_id = %v, want client-abc", entry["client_id"])
+	}
+	if reason, _ := entry["error"].(string); !strings.Contains(reason, "unsupported") {
+		t.Errorf("error = %v, want it to carry the rejection reason", entry["error"])
 	}
 }
 

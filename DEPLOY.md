@@ -27,6 +27,7 @@ A self-hosted Brave sync server backed by SQLite3 and an in-memory cache.
   - [7. Point Brave Browser at the Server](#7-point-brave-browser-at-the-server)
   - [8. Maintenance](#8-maintenance)
     - [View logs](#view-logs)
+    - [Log level and format](#log-level-and-format)
     - [Update the binary](#update-the-binary)
     - [Backup the database](#backup-the-database)
     - [Uninstall](#uninstall)
@@ -155,8 +156,11 @@ ReadWritePaths=/var/lib/litesync
 CapabilityBoundingSet=
 AmbientCapabilities=
 
-# Environment (optional – sets log level)
+# Environment (optional)
+#   ENV                – log format: "local" → console, anything else → JSON
+#   LITESYNC_LOG_LEVEL – debug | info | warn | error (default: info)
 Environment=ENV=production
+Environment=LITESYNC_LOG_LEVEL=info
 
 [Install]
 WantedBy=multi-user.target
@@ -473,7 +477,9 @@ An optional **size cap** bounds each stored password entity's marshalled
 | `LITESYNC_MAX_PASSWORD_SIZE` | `2048` | max bytes per password entity's Specifics; `-1` disables |
 
 Oversize entities are rejected with `HTTP 400` (e.g.
-`rejected: password entity too large (6133 bytes > 2048 byte limit)`). Note: a
+`rejected: password entity too large (6133 bytes > 2048 byte limit)`) and the
+rejection is logged as a `warn` line (`commit rejected by entity policy`) with
+the client id and the reason. Note: a
 password synced with a large note field can exceed the cap; raise it if you need
 notes. To tune:
 
@@ -520,6 +526,48 @@ sudo journalctl -u litesync -f
 
 # Since last boot
 sudo journalctl -u litesync -b
+```
+
+Every request produces one access line with `method`, `path`, `client_ip`,
+`status`, `bytes`, `duration` (seconds) and `req_id`; denials carry their own
+reason and key (`rate limited by IP` with `ip`, `commit rejected by entity
+policy` with `client_id`). To read the JSON stream:
+
+```bash
+# Only failures
+sudo journalctl -u litesync -o cat | jq -c 'select(.level != "info")'
+
+# Everything attributable to one source IP or one Brave client_id
+sudo journalctl -u litesync -o cat \
+  | jq -c 'select(.client_ip == "203.0.113.9" or .ip == "203.0.113.9" or .client_id == "<client id>")'
+```
+
+### Log level and format
+
+Two environment variables on the systemd unit control logging:
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `ENV` | unset | `local` → human-readable console output; anything else → JSON on stdout |
+| `LITESYNC_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, `fatal`, `panic`; an unknown value falls back to `info` |
+
+`ENV=production` (the value shipped in the unit above) is the right choice for
+journald: JSON lines, written through a bounded buffer so a slow log consumer
+cannot stall requests. Use `debug` only while diagnosing — it is verbose and the
+buffer drops messages rather than blocking.
+
+```bash
+sudo systemctl edit litesync
+```
+
+```ini
+[Service]
+Environment=LITESYNC_LOG_LEVEL=debug
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart litesync
 ```
 
 ### Update the binary

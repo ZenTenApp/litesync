@@ -9,7 +9,9 @@ import (
 	"os"
 	"strconv"
 
+	syncContext "github.com/brave/go-sync/context"
 	"github.com/brave/go-sync/schema/protobuf/sync_pb"
+	"github.com/rs/zerolog"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -105,6 +107,13 @@ func (p *entityPolicy) validateEntries(entries []*sync_pb.SyncEntity) error {
 	return nil
 }
 
+// clientIDFromRequest returns the Brave client_id put in the request context by
+// the go-sync Auth middleware, or "" when it is absent.
+func clientIDFromRequest(r *http.Request) string {
+	id, _ := r.Context().Value(syncContext.ContextKeyClientID).(string)
+	return id
+}
+
 // middleware returns a chi-compatible handler that validates COMMIT bodies
 // before the sync controller processes them. Valid requests are passed through
 // untouched (the original body bytes are re-served); rejected requests get 400.
@@ -120,6 +129,8 @@ func (p *entityPolicy) middleware() func(http.Handler) http.Handler {
 			// downstream controller (including its original gzip framing).
 			raw, err := io.ReadAll(io.LimitReader(r.Body, entityPolicyMaxBody))
 			if err != nil {
+				zerolog.Ctx(r.Context()).Warn().Err(err).
+					Msg("failed to read request body")
 				http.Error(w, "failed to read request body", http.StatusBadRequest)
 				return
 			}
@@ -150,6 +161,9 @@ func (p *entityPolicy) middleware() func(http.Handler) http.Handler {
 			if commit := msg.GetCommit(); commit != nil {
 				if entries := commit.GetEntries(); len(entries) > 0 {
 					if err := p.validateEntries(entries); err != nil {
+						zerolog.Ctx(r.Context()).Warn().Err(err).
+							Str("client_id", clientIDFromRequest(r)).
+							Msg("commit rejected by entity policy")
 						http.Error(w, err.Error(), http.StatusBadRequest)
 						return
 					}
